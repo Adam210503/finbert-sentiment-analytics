@@ -1,0 +1,14 @@
+# Ignore local databases and tracking logs
+data/
+logs/
+*.db
+*.log
+
+# Ignore python bytecode and environments
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Ignore local environment keys
+.env
