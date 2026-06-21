@@ -12,3 +12,14 @@ venv/
 
 # Ignore local environment keys
 .env
+
+# ==========================================
+# Machine Learning Artifacts & Model Weights
+# ==========================================
+# Prevents heavy serialized datasets from staging
+training/processed_dataset/
+
+# Prevents raw PyTorch model checkpoints and weights from bloating Git
+training/finetuned_finbert/
+training/results/
+training/logs/
