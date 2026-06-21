@@ -11,33 +11,41 @@ An automated data engineering pipeline that collects financial news headlines an
 
 ## Overview
 
-This is **Phase 1** of a two-phase project. The pipeline continuously ingests raw financial data and structures it for inference. The inference layer — fine-tuned FinBERT scoring, attention-weight extraction, and correlation analytics — is built in Phase 2.
+This is **Phase 1** of a two-phase project. The pipeline continuously ingests raw financial data and structures it for inference. The inference layer, which covers fine-tuned FinBERT scoring, attention-weight extraction, and correlation analytics, is built in Phase 2.
 
 | Phase | Scope | Status |
 |:---|:---|:---|
-| Phase 1 — Data pipeline | Ingestion · Deduplication · SQLite persistence · Observability | ✅ Complete |
-| Phase 2 — NLP + Analytics | FinBERT fine-tuning · Sentiment scoring · Price correlation · Dashboard | 🔧 In progress |
+| Phase 1: Data pipeline | Ingestion, Deduplication, SQLite persistence, and Observability | ✅ Complete |
+| Phase 2: NLP and Analytics | FinBERT fine-tuning, Sentiment scoring, Price correlation, and Dashboard | 🔧 In progress |
 
 ---
 
 ## Key Engineering Decisions
 
 ### SHA-256 cryptographic deduplication
-Every headline is hashed before insertion. The database enforces a `UNIQUE` constraint on `headline_hash`, and all inserts use `INSERT OR IGNORE` — meaning duplicates are silently skipped at the database level rather than caught in application code. This prevents repeated news alerts from inflating downstream sentiment scores and avoids expensive `SELECT` checks before every insert.
+Every headline is hashed before insertion. The database enforces a `UNIQUE` constraint on `headline_hash`, and all inserts use `INSERT OR IGNORE`. This means duplicates are silently skipped at the database level instead of being caught in application code, preventing repeated news alerts from inflating downstream sentiment scores and avoiding expensive `SELECT` checks before every insert.
 
-### market_date normalisation
+### market_date normalization
 Raw article timestamps from NewsAPI are in UTC. A headline published at 23:00 EST cannot affect that day's closing price. The pipeline maps every timestamp to the trading session it can realistically affect:
 
-- Published before 16:00 EST on a weekday → same trading day
-- Published at or after 16:00 EST, or on a weekend → next weekday open
+- Published before 16:00 EST on a weekday: same trading day
+- Published at or after 16:00 EST, or on a weekend: next weekday open
 
-This normalisation is what makes the (ticker, market_date) join between `sentiment_scores` and `price_data` statistically meaningful.
+This normalization makes the (ticker, market_date) join between `sentiment_scores` and `price_data` statistically meaningful.
 
 ### Log returns over simple returns
-Daily price returns are stored as log returns: `ln(close / prev_close)` rather than `(close - prev_close) / prev_close`. Log returns are additive across time periods and more normally distributed — both properties the Pearson correlation engine in Phase 2 depends on.
+Daily price returns are stored as log returns: 
+
+$$\ln\left(\frac{\text{Close}_t}{\text{Close}_{t-1}}\right)$$
+
+instead of simple returns: 
+
+$$\frac{\text{Close}_t - \text{Close}_{t-1}}{\text{Close}_{t-1}}$$
+
+Log returns are additive across time periods and are more normally distributed. The Pearson correlation engine in Phase 2 relies directly on these properties.
 
 ### Decoupled ingestion and inference
-The scheduler writes headlines with `NULL` sentiment fields. The inference layer (Phase 2) reads unscored records via `get_unscored_headlines()` and writes labels back independently. Neither service needs to know the other is running. This means the pipeline accumulates data even before the model is deployed.
+The scheduler writes headlines with `NULL` sentiment fields. The inference layer in Phase 2 reads unscored records via `get_unscored_headlines()` and writes labels back independently. Neither service needs to know the other is running, allowing the pipeline to safely accumulate data even before the model is deployed.
 
 ---
 
@@ -114,8 +122,8 @@ finbert/
 ### Installation
 
 ```bash
-git clone https://github.com/Adam210503/finbert.git
-cd finbert
+git clone git clone https://github.com/Adam210503/finbert-sentiment-analytics.git
+cd finbert-sentiment-analytics
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
