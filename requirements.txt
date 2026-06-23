@@ -13,6 +13,8 @@ APScheduler>=3.10.4
 # ML / inference (Phase 2 — not needed for Phase 1 data collection)
 transformers>=4.40.0
 torch>=2.2.0
+datasets>=5.0.0
+scikit-learn>=1.9.0
 
 # Data processing
 pandas>=2.0.0
