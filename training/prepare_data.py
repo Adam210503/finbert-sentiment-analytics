@@ -1,9 +1,12 @@
 import os
+import sys
 import requests
 import numpy as np
 import pandas as pd
 from datasets import Dataset, DatasetDict
 from sklearn.model_selection import train_test_split
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.helpers import seed_everything
 seed_everything(42)
 

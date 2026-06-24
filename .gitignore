@@ -12,3 +12,8 @@ venv/
 
 # Ignore local environment keys
 .env
+
+# Ignore generated training artifacts
+training/processed_dataset/
+training/results/
+training/finetuned_finbert/
