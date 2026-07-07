@@ -1,13 +1,12 @@
 """
 src/inference/model_runner.py
 ──────────────────────────────
-Scores pending headlines with the fine-tuned FinBERT checkpoint.
+Scores pending headlines using the ProsusAI/finbert base checkpoint.
 
 Reads headlines where sentiment_label IS NULL via
-DatabaseManager.get_unscored_headlines(), runs them through the model
-saved at training/finetuned_finbert/, and writes the predicted label,
-confidence, and an attention-derived keyword back via
-DatabaseManager.update_sentiment().
+DatabaseManager.get_unscored_headlines(), runs them through the model,
+and writes the predicted label, confidence, and an attention-derived
+keyword back via DatabaseManager.update_sentiment().
 
 Usage:
     python src/inference/model_runner.py
@@ -25,13 +24,22 @@ ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from config.logging_config import setup_logging
-from config.settings import DB_PATH, LOG_FILE, MODEL_PATH, SCORING_BATCH_SIZE
+from config.settings import DB_PATH, LOG_FILE, SCORING_BATCH_SIZE
 from src.storage.db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
+# HuggingFace hub ID for the model used in production inference.
+_MODEL_ID = "ProsusAI/finbert"
+
 # Matches the label_mapping used in training/prepare_data.py
 ID2LABEL = {0: "negative", 1: "neutral", 2: "positive"}
+
+# ProsusAI/finbert's native output order (positive=0, negative=1, neutral=2)
+# differs from this project's canonical scheme (negative=0, neutral=1, positive=2).
+# This remap translates base-model prediction indices into our canonical indices
+# before they are written to the database or looked up in ID2LABEL.
+_LABEL_REMAP = {0: 2, 1: 0, 2: 1}
 
 # Forward-pass batch size (kept separate from the larger DB fetch size
 # so a single inference batch fits comfortably in memory).
@@ -54,12 +62,6 @@ def run_scoring_job(db: DatabaseManager) -> int:
     -------
     Total number of headlines scored in this run.
     """
-    if not MODEL_PATH.exists():
-        logger.error(
-            "No model found at '%s'. Run training/train.py first.", MODEL_PATH
-        )
-        return 0
-
     _load_model()
     total_scored = 0
 
@@ -77,7 +79,7 @@ def run_scoring_job(db: DatabaseManager) -> int:
                     label=result["label"],
                     confidence=result["confidence"],
                     attention_keyword=result["attention_keyword"],
-                    model_version=MODEL_PATH.name,
+                    model_version="ProsusAI/finbert-base",
                 )
             total_scored += len(chunk)
 
@@ -96,10 +98,10 @@ def _load_model() -> None:
     if _model is not None:
         return
 
-    logger.info("Loading FinBERT checkpoint from %s (%s)", MODEL_PATH, _device)
-    _tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    logger.info("Loading %s (%s)", _MODEL_ID, _device)
+    _tokenizer = AutoTokenizer.from_pretrained(_MODEL_ID)
     _model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_PATH, attn_implementation="eager"
+        _MODEL_ID, attn_implementation="eager"
     )
     _model.to(_device)
     _model.eval()
@@ -125,7 +127,7 @@ def _score_batch(records: list[dict]) -> list[dict]:
 
     results = []
     for i in range(len(records)):
-        label = ID2LABEL[predictions[i].item()]
+        label = ID2LABEL[_LABEL_REMAP[predictions[i].item()]]
         confidence = confidences[i].item()
         keyword = _extract_attention_keyword(
             encoded["input_ids"][i], encoded["attention_mask"][i], last_layer_attn[i]

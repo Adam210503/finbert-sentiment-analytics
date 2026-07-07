@@ -1,20 +1,16 @@
 import os
-import sys
 import numpy as np
 import torch
 from datasets import DatasetDict
 from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    TrainingArguments,
-    Trainer,
+    AutoTokenizer, 
+    AutoModelForSequenceClassification, 
+    TrainingArguments, 
+    Trainer, 
     DataCollatorWithPadding
 )
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.helpers import seed_everything
-
 seed_everything(42)
 
 def main():
@@ -36,7 +32,7 @@ def main():
 
     # 2. Tokenization Pipeline
     # Using base uncased BERT as the raw architecture foundational weights
-    model_checkpoint = "bert-base-uncased" 
+    model_checkpoint = "ProsusAI/finbert" 
     print(f"\n[2/5] Initializing tokenizer ({model_checkpoint})...")
     tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
 
@@ -101,7 +97,7 @@ def main():
         args=training_args,
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
-        processing_class=tokenizer,        # 💡 CHANGED: renamed from tokenizer=tokenizer
+        processing_class=tokenizer,        # renamed from tokenizer=tokenizer
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
