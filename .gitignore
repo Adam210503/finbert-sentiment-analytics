@@ -7,6 +7,7 @@ logs/
 # Ignore python bytecode and environments
 __pycache__/
 *.pyc
+*.pyo
 venv/
 .venv/
 
@@ -17,3 +18,11 @@ venv/
 training/processed_dataset/
 training/results/
 training/finetuned_finbert/
+training/models/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

@@ -1,15 +1,19 @@
 import os
+import sys
 import numpy as np
 import torch
+from pathlib import Path
 from datasets import DatasetDict
 from transformers import (
-    AutoTokenizer, 
-    AutoModelForSequenceClassification, 
-    TrainingArguments, 
-    Trainer, 
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    TrainingArguments,
+    Trainer,
     DataCollatorWithPadding
 )
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.helpers import seed_everything
 seed_everything(42)
 
