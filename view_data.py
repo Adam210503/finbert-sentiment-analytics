@@ -1,17 +1,28 @@
 import sqlite3
 import pandas as pd
 
+# ── NEW: Tell Pandas to stop hiding text ───────────────────────
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_colwidth', None)
+pd.set_option('display.width', 1000)
+
 # Connect to your local database
 conn = sqlite3.connect("data/sentiment_pipeline.db")
 
 # Load your news headlines into a Pandas DataFrame
 print("\n--- RECENTLY COLLECTED NEWS HEADLINES ---")
-df_news = pd.read_sql_query("SELECT ticker, market_date, headline, source FROM sentiment_scores ORDER BY id DESC LIMIT 10;", conn)
+df_news = pd.read_sql_query(
+    "SELECT ticker, market_date, headline, source FROM sentiment_scores ORDER BY id DESC LIMIT 10;", 
+    conn
+)
 print(df_news)
 
 # Load your job logs to see system performance metrics
 print("\n--- BACKGROUND JOB LOGS ---")
-df_jobs = pd.read_sql_query("SELECT job_name, ran_at, inserted, skipped FROM job_log ORDER BY id DESC LIMIT 5;", conn)
+df_jobs = pd.read_sql_query(
+    "SELECT job_name, ran_at, inserted, skipped FROM job_log ORDER BY id DESC LIMIT 5;", 
+    conn
+)
 print(df_jobs)
 
 conn.close()

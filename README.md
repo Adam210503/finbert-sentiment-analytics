@@ -191,6 +191,31 @@ finbert/
 
 ---
 
+## Runnable Scripts
+
+| Script | Command | Output |
+|:---|:---|:---|
+| `training/prepare_data.py` | `python training/prepare_data.py` | Downloads PhraseBank + FiQA 2018, merges ~6,050 samples, stratified 70/15/15 split. Saves `training/processed_dataset/`. |
+| `training/train.py` | `python training/train.py` | Fine-tunes ProsusAI/finbert. Saves checkpoint to `training/finetuned_finbert/`. Prints loss and metrics per epoch. |
+| `training/evaluate.py` | `python training/evaluate.py` | Base vs fine-tuned comparison on held-out test set. Prints accuracy, macro F1, per-class F1. Saves `evaluation_results.csv` and confusion matrix PNGs. |
+| `src/scheduler.py` | `caffeinate -i python src/scheduler.py` | Starts live pipeline. Fires news, price, and scoring jobs immediately then every 4h / 1h / 2h. Logs to `logs/pipeline.log`. Runs indefinitely. |
+| `src/inference/model_runner.py` | `python src/inference/model_runner.py` | Manually scores all unscored headlines once. Writes label, confidence, attention keyword to DB. |
+| `src/analysis/correlation.py` | `python src/analysis/correlation.py` | 7d/30d rolling Pearson correlation between daily sentiment and next-day log return. Writes to `correlations` table. Prints latest r values per ticker. |
+| `src/analysis/event_study.py` | `python src/analysis/event_study.py` | Detects sentiment spikes (≥0.65 / ≤−0.65), measures t+1d/t+2d/t+5d forward returns. Writes to `spike_events` table. Prints average returns per ticker per spike type. |
+| `check_pipeline_health.py` | `python check_pipeline_health.py` | Read-only snapshot: headline counts, scored/unscored, price records, last fetch times, recent job history. Safe to run while scheduler is live. |
+| `view_data.py` | `python view_data.py` | Prints last 10 headlines and last 5 job log entries. |
+
+**Shell helper (add to `~/.zshrc`):**
+
+```bash
+finbert_results              # last 20 scored headlines, all tickers
+finbert_results 50           # last 50
+finbert_results 20 TSLA      # last 20 TSLA headlines
+finbert_results 20 TSLA positive   # last 20 positive TSLA headlines
+```
+
+---
+
 ## Setup & Usage
 
 ### Prerequisites
@@ -225,7 +250,7 @@ python training/train.py          # fine-tunes ProsusAI/finbert, writes finetune
 python training/evaluate.py       # compares base vs fine-tuned on held-out test set
 ```
 
-`train.py` uses Apple Silicon (MPS) automatically if available, else CPU. Expect 10–20 minutes on MPS for the full ~4,200-row training split. Both scripts are seeded (`seed_everything(42)`) for reproducible splits and weight initialisation.
+`train.py` uses Apple Silicon (MPS) automatically if available, else CPU. Expect 10–20 minutes on MPS. Both scripts are seeded (`seed_everything(42)`) for reproducible splits and weight initialisation.
 
 ### Step 3 — Start the pipeline
 
@@ -233,9 +258,7 @@ python training/evaluate.py       # compares base vs fine-tuned on held-out test
 caffeinate -i python src/scheduler.py
 ```
 
-All three jobs (`news_job`, `price_job`, `scoring_job`) fire immediately on startup, then repeat on their configured intervals.
-
-To keep it running after closing the terminal:
+All three jobs fire immediately on startup, then repeat on their configured intervals. To keep running after closing the terminal:
 
 ```bash
 nohup caffeinate -i python src/scheduler.py > /tmp/finbert.log 2>&1 &
@@ -245,14 +268,15 @@ disown
 ### Step 4 — Run analytics
 
 ```bash
-python src/analysis/correlation.py   # computes rolling Pearson correlation
-python src/analysis/event_study.py   # identifies spike events and forward returns
+python src/analysis/correlation.py   # rolling Pearson correlation
+python src/analysis/event_study.py   # spike event study
 ```
 
 ### Step 5 — Monitor
 
 ```bash
-python check_pipeline_health.py   # read-only, safe to run while scheduler is live
+python check_pipeline_health.py      # DB health snapshot
+tail -f logs/pipeline.log            # live log stream
 ```
 
 ---
