@@ -2,6 +2,7 @@ import os
 import random
 import numpy as np
 import torch
+from transformers import set_seed as _hf_set_seed
 
 def seed_everything(seed: int = 42):
     """
@@ -32,7 +33,10 @@ def seed_everything(seed: int = 42):
         torch.backends.cudnn.deterministic = True
         # Setting this to False prevents cuDNN from continuously benchmarking 
         # different convolution algorithms, which introduces random variance.
-        torch.backends.cudnn.benchmark = False 
+        torch.backends.cudnn.benchmark = False
+
+    # 6. HuggingFace Transformers internal RNG (affects dropout, weight init order)
+    _hf_set_seed(seed)
 
 # Execute the seed freeze immediately
 seed_everything(42)
