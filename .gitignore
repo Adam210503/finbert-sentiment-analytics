@@ -19,6 +19,8 @@ training/processed_dataset/
 training/results/
 training/finetuned_finbert/
 training/models/
+training/tune_trials/
+training/tune_final_tmp/
 
 # macOS
 .DS_Store
