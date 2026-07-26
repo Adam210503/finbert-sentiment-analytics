@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS sentiment_scores (
     confidence        REAL,
     attention_keyword TEXT,
     model_version     TEXT,
-    headline_hash     TEXT    NOT NULL UNIQUE
+    headline_hash     TEXT    NOT NULL UNIQUE,
+    url               TEXT    DEFAULT ''
 );
 """
 
@@ -120,6 +121,15 @@ class DatabaseManager:
                 + _CREATE_JOB_LOG
                 + _CREATE_INDICES
             )
+            # SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS — catch the
+            # OperationalError that fires when the column already exists.
+            try:
+                conn.execute(
+                    "ALTER TABLE sentiment_scores ADD COLUMN url TEXT DEFAULT ''"
+                )
+                logger.info("Migration: added url column to sentiment_scores")
+            except sqlite3.OperationalError:
+                pass  # column already present
         logger.debug("Schema initialised (tables + indices)")
 
     # ── Public: inserts ───────────────────────────────────────────
@@ -144,14 +154,15 @@ class DatabaseManager:
 
         sql = """
             INSERT OR IGNORE INTO sentiment_scores
-                (ticker, headline, source, raw_timestamp, market_date, headline_hash)
+                (ticker, headline, source, raw_timestamp, market_date, headline_hash, url)
             VALUES
-                (:ticker, :headline, :source, :raw_timestamp, :market_date, :headline_hash)
+                (:ticker, :headline, :source, :raw_timestamp, :market_date, :headline_hash, :url)
         """
 
-        # Attach headline_hash to each record before insert
+        # Attach headline_hash and default url (callers that predate url support pass no url key)
         enriched = [
-            {**r, "headline_hash": _hash(r["headline"])} for r in records
+            {**r, "headline_hash": _hash(r["headline"]), "url": r.get("url", "")}
+            for r in records
         ]
 
         inserted = 0

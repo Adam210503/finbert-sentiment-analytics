@@ -14,9 +14,9 @@ An automated data engineering pipeline that collects financial news headlines an
 | Phase | Scope | Status |
 |:---|:---|:---|
 | Phase 1: Data pipeline | Ingestion, deduplication, SQLite persistence, observability | ✅ Complete |
-| Phase 2: NLP | FinBERT fine-tuning, evaluation, live sentiment scoring | ✅ Complete |
+| Phase 2: NLP | FinBERT fine-tuning (Optuna HPO), evaluation, live sentiment scoring | ✅ Complete |
 | Phase 2: Analytics | Rolling correlation, spike event study | ✅ Complete |
-| Phase 3: Dashboard | Streamlit analytics + observability panel | 🔧 In progress |
+| Phase 3: Dashboard | FastAPI REST backend + React frontend | 🔧 In progress |
 | Phase 4: Deployment | Docker Compose containerisation | ⏳ Pending |
 
 ---
@@ -37,18 +37,23 @@ FiQA's native label order (`0=positive, 1=neutral, 2=negative`) is remapped to t
 
 ### Hyperparameters
 
-| Parameter | Value | Rationale |
+Hyperparameters were selected via **Optuna** (30 trials, TPE sampler, MedianPruner). The best trial (#22) was used for the final retrain on train+validation combined.
+
+| Parameter | Value | Source |
 |:---|:---|:---|
 | Base model | `ProsusAI/finbert` | Pre-trained on 4.9B financial tokens (Reuters, Bloomberg, SEC filings) |
-| Learning rate | 2e-5 | BERT paper recommendation; low enough to avoid catastrophic forgetting |
-| Batch size | 16 | Memory-efficient on MPS |
-| Epochs | 3 | BERT paper recommends 2–4; early stopping guards against overfitting |
-| Weight decay | 0.01 | L2 regularisation on non-bias/LayerNorm params |
+| Learning rate | 4.49e-05 | Optuna best trial |
+| Batch size | 16 | Optuna best trial |
+| Epochs | 3 | Optuna best trial |
+| Weight decay | 0.0836 | Optuna best trial |
+| Warmup ratio | 0.176 | Optuna best trial |
 | Max sequence length | 128 | Headlines average 12–15 tokens; avoids 16× memory cost of max_length=512 |
 | Optimiser | AdamW | Decoupled weight decay; standard for transformer fine-tuning |
 | Best model metric | Macro F1 | Weights all classes equally; accuracy is misleading on imbalanced data |
 | Device | MPS (Apple Silicon) → CPU fallback | |
-| Seed | 42 | Applied across Python, NumPy, PyTorch CPU, MPS |
+| Seed | 42 | Applied across Python, NumPy, PyTorch CPU/MPS, HuggingFace Transformers |
+
+Full Optuna trial log: [`training/optuna_results.csv`](training/optuna_results.csv)
 
 ### Evaluation results
 
@@ -59,10 +64,10 @@ Evaluated on the held-out test split (15% of combined corpus, ~907 samples). Bot
 | Model | Accuracy | Macro F1 | Negative F1 | Neutral F1 | Positive F1 |
 |:---|:---|:---|:---|:---|:---|
 | ProsusAI/finbert (base) | 0.8218 | 0.8168 | 0.8063 | 0.8382 | 0.8059 |
-| **Fine-tuned** (ours) | **0.9138** | **0.9021** | **0.8488** | **0.9457** | **0.9118** |
-| Delta | +0.0920 | **+0.0853** | +0.0425 | +0.1075 | +0.1059 |
+| **Fine-tuned** (ours, Optuna) | **0.9291** | **0.9201** | **0.8792** | **0.9569** | **0.9242** |
+| Delta | +0.1073 | **+0.1033** | +0.0729 | +0.1187 | +0.1183 |
 
-The fine-tuned model outperforms the base across every metric. The largest gain is on the neutral class (+10.75 F1), which is typically the hardest to classify in financial text due to its ambiguity.
+The fine-tuned model outperforms the base across every metric. The largest gains are on the neutral (+11.87 F1) and positive (+11.83 F1) classes. Negative remains the hardest class for both models — negative financial language tends to be more nuanced than clearly positive signals.
 
 Confusion matrices: [`training/confusion_base.png`](training/confusion_base.png) · [`training/confusion_finetuned.png`](training/confusion_finetuned.png)
 Full results CSV: [`training/evaluation_results.csv`](training/evaluation_results.csv)
@@ -99,7 +104,7 @@ Log returns are additive across time periods and more normally distributed than 
 The scheduler writes headlines with `NULL` sentiment fields. `scoring_job` reads unscored records via `get_unscored_headlines()` and writes labels back independently on its own 2h interval. Ingestion and scoring have no runtime dependency on each other.
 
 ### Label remap at inference time
-`ProsusAI/finbert`'s native output order (`positive=0, negative=1, neutral=2`) differs from the project's canonical scheme (`negative=0, neutral=1, positive=2`). A remap `{0→2, 1→0, 2→1}` is applied inside `model_runner.py` when using the base model, so all database writes always use the canonical scheme regardless of which checkpoint is loaded.
+`ProsusAI/finbert`'s native output order (`positive=0, negative=1, neutral=2`) differs from the project's canonical scheme (`negative=0, neutral=1, positive=2`). The fine-tuned checkpoint inherits this native ordering (confirmed via `config.json`). A remap `{0→2, 1→0, 2→1}` is applied inside `model_runner.py` so all database writes always use the canonical scheme regardless of which checkpoint is loaded.
 
 ---
 
@@ -140,9 +145,11 @@ The scheduler writes headlines with `NULL` sentiment fields. `scoring_job` reads
 | Deduplication | hashlib SHA-256 (standard library) |
 | Base model | ProsusAI/finbert (pre-trained on 4.9B financial tokens) |
 | Fine-tuning | HuggingFace Transformers · Trainer API · AdamW |
+| HPO | Optuna (TPE sampler, MedianPruner, 30 trials) |
 | Training data | Financial PhraseBank + FiQA 2018 (~6,050 samples) |
 | Analysis | pandas · scipy · statsmodels |
-| Dashboard | Streamlit + Plotly |
+| API backend | FastAPI · uvicorn |
+| Frontend | React (in progress) |
 | Infrastructure | Docker Compose (backend + dashboard services) |
 | Config | python-dotenv (`.env` file, gitignored) |
 
@@ -170,13 +177,18 @@ finbert/
 ├── training/
 │   ├── prepare_data.py               # PhraseBank + FiQA 2018 → stratified 70/15/15 split
 │   ├── train.py                      # Fine-tunes ProsusAI/finbert, saves checkpoint
+│   ├── tune.py                       # Optuna HPO: 30 trials → best params → final retrain
 │   ├── evaluate.py                   # Base vs fine-tuned comparison on held-out test set
 │   ├── evaluation_results.csv        # Exported evaluation metrics
+│   ├── optuna_results.csv            # Per-trial hyperparameters and val macro F1
 │   ├── confusion_base.png            # Confusion matrix — base model
 │   ├── confusion_finetuned.png       # Confusion matrix — fine-tuned model
 │   └── finetuned_finbert/            # Saved checkpoint (gitignored — generate locally)
 ├── utils/
 │   └── helpers.py                    # seed_everything() for reproducibility
+├── dashboard/
+│   └── api/
+│       └── main.py                   # FastAPI REST API: /health /sentiment /correlation /events /keywords /flow
 ├── check_pipeline_health.py          # Observability: DB metrics, job history, backlog
 ├── view_data.py                      # Quick DB table viewer
 ├── data/
@@ -196,7 +208,8 @@ finbert/
 | Script | Command | Output |
 |:---|:---|:---|
 | `training/prepare_data.py` | `python training/prepare_data.py` | Downloads PhraseBank + FiQA 2018, merges ~6,050 samples, stratified 70/15/15 split. Saves `training/processed_dataset/`. |
-| `training/train.py` | `python training/train.py` | Fine-tunes ProsusAI/finbert. Saves checkpoint to `training/finetuned_finbert/`. Prints loss and metrics per epoch. |
+| `training/train.py` | `python training/train.py` | Fine-tunes ProsusAI/finbert with fixed hyperparameters. Saves checkpoint to `training/finetuned_finbert/`. |
+| `training/tune.py` | `python training/tune.py` | Optuna HPO: 30 trials (TPE sampler, MedianPruner), then retrains on train+val with best params, then calls `evaluate.py`. Saves `optuna_results.csv`. |
 | `training/evaluate.py` | `python training/evaluate.py` | Base vs fine-tuned comparison on held-out test set. Prints accuracy, macro F1, per-class F1. Saves `evaluation_results.csv` and confusion matrix PNGs. |
 | `src/scheduler.py` | `caffeinate -i python src/scheduler.py` | Starts live pipeline. Fires news, price, and scoring jobs immediately then every 4h / 1h / 2h. Logs to `logs/pipeline.log`. Runs indefinitely. |
 | `src/inference/model_runner.py` | `python src/inference/model_runner.py` | Manually scores all unscored headlines once. Writes label, confidence, attention keyword to DB. |
@@ -296,8 +309,9 @@ tail -f logs/pipeline.log            # live log stream
 | `sentiment_label` | TEXT | positive / neutral / negative |
 | `confidence` | REAL | Softmax probability of predicted class |
 | `attention_keyword` | TEXT | Token most attended to by [CLS] in last layer |
-| `model_version` | TEXT | Checkpoint identifier for reproducibility |
+| `model_version` | TEXT | Checkpoint identifier (`ProsusAI/finbert-base` or `finetuned_finbert-optuna`) |
 | `headline_hash` | TEXT UNIQUE | SHA-256 hash for deduplication |
+| `url` | TEXT | Article URL from NewsAPI (populated for rows collected after migration) |
 
 ### `price_data`
 
@@ -346,8 +360,8 @@ tail -f logs/pipeline.log            # live log stream
 
 ## What's Next
 
-- [ ] Streamlit dashboard — analytics panel (sentiment feed, correlation charts, event study, keyword table) + observability panel (API health, data freshness, error log tail)
-- [ ] Docker Compose — containerise backend scheduler and Streamlit frontend as separate services
+- [ ] React frontend — consumes the FastAPI backend; sentiment feed, dual-axis correlation chart, event study table, keyword breakdown, flow strip
+- [ ] Docker Compose — containerise scheduler, FastAPI backend, and React frontend as separate services
 
 ---
 

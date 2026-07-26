@@ -1,7 +1,8 @@
 """
 src/inference/model_runner.py
 ──────────────────────────────
-Scores pending headlines using the ProsusAI/finbert base checkpoint.
+Scores pending headlines using the locally fine-tuned FinBERT checkpoint
+(training/finetuned_finbert, 0.920 macro F1 vs 0.817 for the base model).
 
 Reads headlines where sentiment_label IS NULL via
 DatabaseManager.get_unscored_headlines(), runs them through the model,
@@ -30,15 +31,15 @@ from src.storage.db_manager import DatabaseManager
 logger = logging.getLogger(__name__)
 
 # HuggingFace hub ID for the model used in production inference.
-_MODEL_ID = "ProsusAI/finbert"
+_MODEL_ID = str(ROOT / "training" / "finetuned_finbert")
 
 # Matches the label_mapping used in training/prepare_data.py
 ID2LABEL = {0: "negative", 1: "neutral", 2: "positive"}
 
-# ProsusAI/finbert's native output order (positive=0, negative=1, neutral=2)
-# differs from this project's canonical scheme (negative=0, neutral=1, positive=2).
-# This remap translates base-model prediction indices into our canonical indices
-# before they are written to the database or looked up in ID2LABEL.
+# The fine-tuned checkpoint inherits ProsusAI/finbert's native output order
+# (positive=0, negative=1, neutral=2) — confirmed via config.json id2label.
+# This remap translates model prediction indices into this project's canonical
+# scheme (negative=0, neutral=1, positive=2) before writing to the database.
 _LABEL_REMAP = {0: 2, 1: 0, 2: 1}
 
 # Forward-pass batch size (kept separate from the larger DB fetch size
@@ -79,7 +80,7 @@ def run_scoring_job(db: DatabaseManager) -> int:
                     label=result["label"],
                     confidence=result["confidence"],
                     attention_keyword=result["attention_keyword"],
-                    model_version="ProsusAI/finbert-base",
+                    model_version="finetuned_finbert-optuna",
                 )
             total_scored += len(chunk)
 
@@ -98,13 +99,14 @@ def _load_model() -> None:
     if _model is not None:
         return
 
-    logger.info("Loading %s (%s)", _MODEL_ID, _device)
+    logger.info("Loading checkpoint: %s  device: %s", _MODEL_ID, _device)
     _tokenizer = AutoTokenizer.from_pretrained(_MODEL_ID)
     _model = AutoModelForSequenceClassification.from_pretrained(
         _MODEL_ID, attn_implementation="eager"
     )
     _model.to(_device)
     _model.eval()
+    logger.info("Checkpoint ready — %s", Path(_MODEL_ID).name)
 
 
 def _score_batch(records: list[dict]) -> list[dict]:
