@@ -1,8 +1,8 @@
 # FinBERT: Automated Financial Sentiment Pipeline
 
-An automated data engineering pipeline that collects financial news headlines and equity price data on scheduled intervals, deduplicates and warehouses them in a local SQLite store, and prepares a structured time-series dataset for downstream sentiment analysis using a fine-tuned FinBERT transformer model.
+An automated data engineering pipeline that collects financial news headlines and equity price data on scheduled intervals, deduplicates and warehouses them in a local SQLite store, fine-tunes ProsusAI/finbert on a combined Financial PhraseBank + FiQA 2018 corpus, and scores live headlines with the resulting checkpoint — correlating daily sentiment signals against real log returns for AAPL, TSLA, and SPY.
 
-[![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 [![SQLite](https://img.shields.io/badge/SQLite-3-003B57?style=flat&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![APScheduler](https://img.shields.io/badge/APScheduler-3.10+-FF6B35?style=flat)](https://apscheduler.readthedocs.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -11,41 +11,100 @@ An automated data engineering pipeline that collects financial news headlines an
 
 ## Overview
 
-This is **Phase 1** of a two-phase project. The pipeline continuously ingests raw financial data and structures it for inference. The inference layer, which covers fine-tuned FinBERT scoring, attention-weight extraction, and correlation analytics, is built in Phase 2.
-
 | Phase | Scope | Status |
 |:---|:---|:---|
-| Phase 1: Data pipeline | Ingestion, Deduplication, SQLite persistence, and Observability | ✅ Complete |
-| Phase 2: NLP and Analytics | FinBERT fine-tuning, Sentiment scoring, Price correlation, and Dashboard | 🔧 In progress |
+| Phase 1: Data pipeline | Ingestion, deduplication, SQLite persistence, observability | ✅ Complete |
+| Phase 2: NLP | FinBERT fine-tuning (Optuna HPO), evaluation, live sentiment scoring | ✅ Complete |
+| Phase 2: Analytics | Rolling correlation, spike event study | ✅ Complete |
+| Phase 3: Dashboard | FastAPI REST backend + React frontend | 🔧 In progress |
+| Phase 4: Deployment | Docker Compose containerisation | ⏳ Pending |
+
+---
+
+## Model Card
+
+### Training data
+
+| Dataset | Source | Samples | Notes |
+|:---|:---|:---|:---|
+| Financial PhraseBank | Raw HTTP (Sentences_AllAgree.txt) | 4,840 | Expert-annotated financial news; all-agree split for highest label confidence |
+| FiQA 2018 | `pauri32/fiqa-2018` (HuggingFace) | 1,213 | Financial QA with sentiment; broader language register than news-only |
+| **Combined** | | **~6,050** | Shuffled, stratified 70/15/15 split |
+
+**Label scheme:** `0 = negative`, `1 = neutral`, `2 = positive`
+
+FiQA's native label order (`0=positive, 1=neutral, 2=negative`) is remapped to the canonical scheme during data preparation.
+
+### Hyperparameters
+
+Hyperparameters were selected via **Optuna** (30 trials, TPE sampler, MedianPruner). The best trial (#22) was used for the final retrain on train+validation combined.
+
+| Parameter | Value | Source |
+|:---|:---|:---|
+| Base model | `ProsusAI/finbert` | Pre-trained on 4.9B financial tokens (Reuters, Bloomberg, SEC filings) |
+| Learning rate | 4.49e-05 | Optuna best trial |
+| Batch size | 16 | Optuna best trial |
+| Epochs | 3 | Optuna best trial |
+| Weight decay | 0.0836 | Optuna best trial |
+| Warmup ratio | 0.176 | Optuna best trial |
+| Max sequence length | 128 | Headlines average 12–15 tokens; avoids 16× memory cost of max_length=512 |
+| Optimiser | AdamW | Decoupled weight decay; standard for transformer fine-tuning |
+| Best model metric | Macro F1 | Weights all classes equally; accuracy is misleading on imbalanced data |
+| Device | MPS (Apple Silicon) → CPU fallback | |
+| Seed | 42 | Applied across Python, NumPy, PyTorch CPU/MPS, HuggingFace Transformers |
+
+Full Optuna trial log: [`training/optuna_results.csv`](training/optuna_results.csv)
+
+### Evaluation results
+
+Evaluated on the held-out test split (15% of combined corpus, ~907 samples). Both models tokenised with `AutoTokenizer.from_pretrained("ProsusAI/finbert")`, max_length=128.
+
+> **Note:** The base model's native label order (`positive=0, negative=1, neutral=2`) differs from the project's canonical scheme. A label remap `{0→2, 1→0, 2→1}` is applied to base model predictions at inference time.
+
+| Model | Accuracy | Macro F1 | Negative F1 | Neutral F1 | Positive F1 |
+|:---|:---|:---|:---|:---|:---|
+| ProsusAI/finbert (base) | 0.8218 | 0.8168 | 0.8063 | 0.8382 | 0.8059 |
+| **Fine-tuned** (ours, Optuna) | **0.9291** | **0.9201** | **0.8792** | **0.9569** | **0.9242** |
+| Delta | +0.1073 | **+0.1033** | +0.0729 | +0.1187 | +0.1183 |
+
+The fine-tuned model outperforms the base across every metric. The largest gains are on the neutral (+11.87 F1) and positive (+11.83 F1) classes. Negative remains the hardest class for both models — negative financial language tends to be more nuanced than clearly positive signals.
+
+Confusion matrices: [`training/confusion_base.png`](training/confusion_base.png) · [`training/confusion_finetuned.png`](training/confusion_finetuned.png)
+Full results CSV: [`training/evaluation_results.csv`](training/evaluation_results.csv)
+
+### Limitations
+
+- **Attention keyword is a heuristic.** The attention-derived keyword (`attention_keyword`) is the token most attended to by `[CLS]` in the final encoder layer. This frequently surfaces function words rather than substantive terms. Useful as a debugging signal, not rigorous attribution.
+- **Small corpus.** ~6,050 samples is modest for transformer fine-tuning. Performance on out-of-domain financial text (e.g. earnings call transcripts, analyst reports) may degrade.
+- **Label noise in FiQA.** FiQA 2018 covers financial question-answering, a slightly different domain from news headlines. Some label boundary cases may be inconsistent across datasets.
 
 ---
 
 ## Key Engineering Decisions
 
 ### SHA-256 cryptographic deduplication
-Every headline is hashed before insertion. The database enforces a `UNIQUE` constraint on `headline_hash`, and all inserts use `INSERT OR IGNORE`. This means duplicates are silently skipped at the database level instead of being caught in application code, preventing repeated news alerts from inflating downstream sentiment scores and avoiding expensive `SELECT` checks before every insert.
+Every headline is hashed before insertion. The database enforces a `UNIQUE` constraint on `headline_hash`, and all inserts use `INSERT OR IGNORE`. Duplicates are silently skipped at the database level, preventing repeated news alerts from inflating downstream sentiment scores.
 
-### market_date normalization
+### market_date normalisation
 Raw article timestamps from NewsAPI are in UTC. A headline published at 23:00 EST cannot affect that day's closing price. The pipeline maps every timestamp to the trading session it can realistically affect:
 
-- Published before 16:00 EST on a weekday: same trading day
-- Published at or after 16:00 EST, or on a weekend: next weekday open
+- Published before 16:00 EST on a weekday → same trading day
+- Published at or after 16:00 EST, or on a weekend → next weekday open
 
-This normalization makes the (ticker, market_date) join between `sentiment_scores` and `price_data` statistically meaningful.
+This normalisation makes the `(ticker, market_date)` join between `sentiment_scores` and `price_data` statistically meaningful.
 
 ### Log returns over simple returns
-Daily price returns are stored as log returns: 
+Daily price returns are stored as log returns:
 
 $$\ln\left(\frac{\text{Close}_t}{\text{Close}_{t-1}}\right)$$
 
-instead of simple returns: 
-
-$$\frac{\text{Close}_t - \text{Close}_{t-1}}{\text{Close}_{t-1}}$$
-
-Log returns are additive across time periods and are more normally distributed. The Pearson correlation engine in Phase 2 relies directly on these properties.
+Log returns are additive across time periods and more normally distributed than simple returns. The Pearson correlation engine relies on these properties.
 
 ### Decoupled ingestion and inference
-The scheduler writes headlines with `NULL` sentiment fields. The inference layer in Phase 2 reads unscored records via `get_unscored_headlines()` and writes labels back independently. Neither service needs to know the other is running, allowing the pipeline to safely accumulate data even before the model is deployed.
+The scheduler writes headlines with `NULL` sentiment fields. `scoring_job` reads unscored records via `get_unscored_headlines()` and writes labels back independently on its own 2h interval. Ingestion and scoring have no runtime dependency on each other.
+
+### Label remap at inference time
+`ProsusAI/finbert`'s native output order (`positive=0, negative=1, neutral=2`) differs from the project's canonical scheme (`negative=0, neutral=1, positive=2`). The fine-tuned checkpoint inherits this native ordering (confirmed via `config.json`). A remap `{0→2, 1→0, 2→1}` is applied inside `model_runner.py` so all database writes always use the canonical scheme regardless of which checkpoint is loaded.
 
 ---
 
@@ -53,20 +112,24 @@ The scheduler writes headlines with `NULL` sentiment fields. The inference layer
 
 ```
 [NewsAPI]  ──── every 4h ────┐
-                              ├──► [src/scheduler.py] ──► [SHA-256 hash check] ──► [SQLite]
-[yfinance] ──── every 1h ────┘                                                  (sentiment_pipeline.db)
-                                                                                        │
-                                                              [check_pipeline_health.py]┘
-                                                              (observability — safe to run in parallel)
+                              ├──► [src/scheduler.py] ──► [SHA-256 dedup] ──► [SQLite]
+[yfinance] ──── every 1h ────┘                                           (sentiment_pipeline.db)
+                                                                                 │
+                    [scoring_job] ◄── NULL sentiment rows ───────────────────────┤
+                    (every 2h, src/inference/model_runner.py)                    │
+                                                                                 │
+                    [src/analysis/correlation.py] ─── correlations table ────────┤
+                    [src/analysis/event_study.py] ─── spike_events table ─────────┘
 ```
 
 **Data flow:**
 
-1. `scheduler.py` triggers `news_job` and `price_job` on configurable intervals
+1. `scheduler.py` triggers `news_job`, `price_job`, and `scoring_job` on configurable intervals
 2. Each collector fetches data and returns normalised records
 3. `db_manager.py` applies `INSERT OR IGNORE` deduplication and writes to SQLite
-4. Every job execution is logged to `job_log` with inserted/skipped counts
-5. `check_pipeline_health.py` reads the database and prints a live health summary
+4. `scoring_job` pulls rows with `sentiment_label IS NULL`, runs them through the fine-tuned FinBERT checkpoint, and writes label, confidence, and attention keyword back in place
+5. `correlation.py` aggregates daily mean sentiment, joins with price data, and computes 7d/30d rolling Pearson correlation
+6. `event_study.py` identifies sentiment spike events and measures t+1d/t+2d/t+5d log returns
 
 ---
 
@@ -74,13 +137,21 @@ The scheduler writes headlines with `NULL` sentiment fields. The inference layer
 
 | Category | Technology |
 |:---|:---|
-| Language | Python 3.12+ |
+| Language | Python 3.11+ |
 | Scheduler | APScheduler 3.10+ |
 | Database | SQLite3 (standard library) |
 | News data | NewsAPI v2 `/everything` endpoint |
 | Price data | yfinance (OHLCV, auto-adjusted) |
 | Deduplication | hashlib SHA-256 (standard library) |
-| NLP model (Phase 2) | ProsusAI/finbert — HuggingFace Transformers |
+| Base model | ProsusAI/finbert (pre-trained on 4.9B financial tokens) |
+| Fine-tuning | HuggingFace Transformers · Trainer API · AdamW |
+| HPO | Optuna (TPE sampler, MedianPruner, 30 trials) |
+| Training data | Financial PhraseBank + FiQA 2018 (~6,050 samples) |
+| Analysis | pandas · scipy · statsmodels |
+| API backend | FastAPI · uvicorn |
+| Frontend | React (in progress) |
+| Infrastructure | Docker Compose (backend + dashboard services) |
+| Config | python-dotenv (`.env` file, gitignored) |
 
 ---
 
@@ -89,24 +160,71 @@ The scheduler writes headlines with `NULL` sentiment fields. The inference layer
 ```
 finbert/
 ├── config/
-│   ├── settings.py               # Centralised config: tickers, intervals, paths, API keys
-│   └── logging_config.py         # Console + rotating file log handler setup
+│   ├── settings.py                   # Centralised config: tickers, intervals, paths, API keys
+│   └── logging_config.py             # Console + rotating file log handler
 ├── src/
 │   ├── collectors/
-│   │   ├── news_fetcher.py       # NewsAPI fetcher: market_date normalisation, backoff
-│   │   └── market_data.py        # yfinance OHLCV fetcher: log return calculation
+│   │   ├── news_fetcher.py           # NewsAPI fetcher: market_date normalisation, backoff
+│   │   └── market_data.py            # yfinance OHLCV fetcher: log return calculation
+│   ├── inference/
+│   │   └── model_runner.py           # FinBERT scoring: batch inference → update_sentiment()
+│   ├── analysis/
+│   │   ├── correlation.py            # 7d/30d rolling Pearson correlation → correlations table
+│   │   └── event_study.py            # Spike event detection → spike_events table
 │   ├── storage/
-│   │   └── db_manager.py         # Schema init, INSERT OR IGNORE, health queries
-│   └── scheduler.py              # APScheduler entry point: news_job + price_job
-├── check_pipeline_health.py      # Observability script: DB metrics, job history, backlog
-├── view_data.py                  # Quick DB table viewer for local inspection
+│   │   └── db_manager.py             # Schema init, INSERT OR IGNORE, health queries
+│   └── scheduler.py                  # APScheduler entry point: news + price + scoring jobs
+├── training/
+│   ├── prepare_data.py               # PhraseBank + FiQA 2018 → stratified 70/15/15 split
+│   ├── train.py                      # Fine-tunes ProsusAI/finbert, saves checkpoint
+│   ├── tune.py                       # Optuna HPO: 30 trials → best params → final retrain
+│   ├── evaluate.py                   # Base vs fine-tuned comparison on held-out test set
+│   ├── evaluation_results.csv        # Exported evaluation metrics
+│   ├── optuna_results.csv            # Per-trial hyperparameters and val macro F1
+│   ├── confusion_base.png            # Confusion matrix — base model
+│   ├── confusion_finetuned.png       # Confusion matrix — fine-tuned model
+│   └── finetuned_finbert/            # Saved checkpoint (gitignored — generate locally)
+├── utils/
+│   └── helpers.py                    # seed_everything() for reproducibility
+├── dashboard/
+│   └── api/
+│       └── main.py                   # FastAPI REST API: /health /sentiment /correlation /events /keywords /flow
+├── check_pipeline_health.py          # Observability: DB metrics, job history, backlog
+├── view_data.py                      # Quick DB table viewer
 ├── data/
-│   └── sentiment_pipeline.db     # SQLite database (excluded from Git via .gitignore)
+│   └── sentiment_pipeline.db         # SQLite database (gitignored)
 ├── logs/
-│   └── pipeline.log              # Rotating execution log (excluded from Git)
+│   └── pipeline.log                  # Rotating execution log (gitignored)
+├── .env                              # NEWSAPI_KEY (gitignored)
 ├── .gitignore
 ├── requirements.txt
 └── README.md
+```
+
+---
+
+## Runnable Scripts
+
+| Script | Command | Output |
+|:---|:---|:---|
+| `training/prepare_data.py` | `python training/prepare_data.py` | Downloads PhraseBank + FiQA 2018, merges ~6,050 samples, stratified 70/15/15 split. Saves `training/processed_dataset/`. |
+| `training/train.py` | `python training/train.py` | Fine-tunes ProsusAI/finbert with fixed hyperparameters. Saves checkpoint to `training/finetuned_finbert/`. |
+| `training/tune.py` | `python training/tune.py` | Optuna HPO: 30 trials (TPE sampler, MedianPruner), then retrains on train+val with best params, then calls `evaluate.py`. Saves `optuna_results.csv`. |
+| `training/evaluate.py` | `python training/evaluate.py` | Base vs fine-tuned comparison on held-out test set. Prints accuracy, macro F1, per-class F1. Saves `evaluation_results.csv` and confusion matrix PNGs. |
+| `src/scheduler.py` | `caffeinate -i python src/scheduler.py` | Starts live pipeline. Fires news, price, and scoring jobs immediately then every 4h / 1h / 2h. Logs to `logs/pipeline.log`. Runs indefinitely. |
+| `src/inference/model_runner.py` | `python src/inference/model_runner.py` | Manually scores all unscored headlines once. Writes label, confidence, attention keyword to DB. |
+| `src/analysis/correlation.py` | `python src/analysis/correlation.py` | 7d/30d rolling Pearson correlation between daily sentiment and next-day log return. Writes to `correlations` table. Prints latest r values per ticker. |
+| `src/analysis/event_study.py` | `python src/analysis/event_study.py` | Detects sentiment spikes (≥0.65 / ≤−0.65), measures t+1d/t+2d/t+5d forward returns. Writes to `spike_events` table. Prints average returns per ticker per spike type. |
+| `check_pipeline_health.py` | `python check_pipeline_health.py` | Read-only snapshot: headline counts, scored/unscored, price records, last fetch times, recent job history. Safe to run while scheduler is live. |
+| `view_data.py` | `python view_data.py` | Prints last 10 headlines and last 5 job log entries. |
+
+**Shell helper (add to `~/.zshrc`):**
+
+```bash
+finbert_results              # last 20 scored headlines, all tickers
+finbert_results 50           # last 50
+finbert_results 20 TSLA      # last 20 TSLA headlines
+finbert_results 20 TSLA positive   # last 20 positive TSLA headlines
 ```
 
 ---
@@ -115,73 +233,63 @@ finbert/
 
 ### Prerequisites
 
-- Python 3.12+
-- A free [NewsAPI key](https://newsapi.org/register) (100 requests/day on free tier)
+- Python 3.11+
+- A free [NewsAPI key](https://newsapi.org/register) (100 requests/day on the free tier)
 - macOS, Linux, or WSL2
 
 ### Installation
 
 ```bash
-git clone git clone https://github.com/Adam210503/finbert-sentiment-analytics.git
+git clone https://github.com/Adam210503/finbert-sentiment-analytics.git
 cd finbert-sentiment-analytics
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Step 1 — Start the pipeline
+### Step 1 — Configure your API key
+
+```
+NEWSAPI_KEY=your_api_key_here
+```
+
+Create this as a `.env` file at the project root (already gitignored). `config/settings.py` loads it automatically.
+
+### Step 2 — Build the training dataset and fine-tune
 
 ```bash
-export NEWSAPI_KEY=your_api_key_here
-python src/scheduler.py
+python training/prepare_data.py   # downloads PhraseBank + FiQA 2018, writes processed_dataset/
+python training/train.py          # fine-tunes ProsusAI/finbert, writes finetuned_finbert/
+python training/evaluate.py       # compares base vs fine-tuned on held-out test set
 ```
 
-On macOS, wrap with `caffeinate` to prevent the system from sleeping and interrupting the scheduler:
+`train.py` uses Apple Silicon (MPS) automatically if available, else CPU. Expect 10–20 minutes on MPS. Both scripts are seeded (`seed_everything(42)`) for reproducible splits and weight initialisation.
+
+### Step 3 — Start the pipeline
 
 ```bash
-NEWSAPI_KEY=your_api_key_here caffeinate -i python src/scheduler.py
+caffeinate -i python src/scheduler.py
 ```
 
-> **Tip:** To keep your MacBook running with the display off, lower screen brightness to zero rather than closing the lid. Closing the lid triggers a hardware sleep signal that `caffeinate` cannot override.
-
-Both jobs run immediately on startup, then repeat on their configured intervals.
-
-### Step 2 — Monitor the pipeline
-
-Open a second terminal window (leave the scheduler running) and run:
+All three jobs fire immediately on startup, then repeat on their configured intervals. To keep running after closing the terminal:
 
 ```bash
-python check_pipeline_health.py
+nohup caffeinate -i python src/scheduler.py > /tmp/finbert.log 2>&1 &
+disown
 ```
 
-This is safe to run at any time — it only reads from the database and does not interrupt active scheduler threads.
-
-Example output:
-
-```
-────────────────────────────────────────
-Pipeline Health  —  2026-05-14 09:45:01
-────────────────────────────────────────
-Total headlines      :  247
-  Scored             :    0  (awaiting Phase 2 inference)
-  Unscored backlog   :  247
-
-Total price records  :   42
-
-Last news ingestion  :  2026-05-14T09:30:02Z
-Last price record    :  2026-05-14
-
-Recent job history:
-  news_job   09:30:02   inserted=31  skipped=8
-  price_job  09:30:05   inserted=6   skipped=0
-  news_job   05:30:01   inserted=19  skipped=4
-────────────────────────────────────────
-```
-
-### Step 3 — Inspect the database directly
+### Step 4 — Run analytics
 
 ```bash
-python view_data.py
+python src/analysis/correlation.py   # rolling Pearson correlation
+python src/analysis/event_study.py   # spike event study
+```
+
+### Step 5 — Monitor
+
+```bash
+python check_pipeline_health.py      # DB health snapshot
+tail -f logs/pipeline.log            # live log stream
 ```
 
 ---
@@ -190,75 +298,76 @@ python view_data.py
 
 ### `sentiment_scores`
 
-One row per unique headline. Sentiment fields are `NULL` until Phase 2 inference runs.
-
 | Column | Type | Description |
 |:---|:---|:---|
 | `id` | INTEGER PK | Auto-increment |
 | `ticker` | TEXT | AAPL / TSLA / SPY |
 | `headline` | TEXT | Raw headline text |
-| `source` | TEXT | Publishing outlet (e.g. reuters.com) |
-| `raw_timestamp` | TEXT | Original UTC publish time (ISO 8601) |
+| `source` | TEXT | Publishing outlet |
+| `raw_timestamp` | TEXT | UTC publish time (ISO 8601) |
 | `market_date` | TEXT | Normalised trading date (YYYY-MM-DD) |
-| `sentiment_label` | TEXT | positive / neutral / negative — filled by Phase 2 |
-| `confidence` | REAL | Softmax probability of predicted class — filled by Phase 2 |
-| `attention_keyword` | TEXT | Top attention-weighted token — filled by Phase 2 |
-| `model_version` | TEXT | Checkpoint identifier for reproducibility |
+| `sentiment_label` | TEXT | positive / neutral / negative |
+| `confidence` | REAL | Softmax probability of predicted class |
+| `attention_keyword` | TEXT | Token most attended to by [CLS] in last layer |
+| `model_version` | TEXT | Checkpoint identifier (`ProsusAI/finbert-base` or `finetuned_finbert-optuna`) |
 | `headline_hash` | TEXT UNIQUE | SHA-256 hash for deduplication |
+| `url` | TEXT | Article URL from NewsAPI (populated for rows collected after migration) |
 
 ### `price_data`
 
-One row per ticker per trading day.
-
 | Column | Type | Description |
 |:---|:---|:---|
-| `id` | INTEGER PK | Auto-increment |
 | `ticker` | TEXT | AAPL / TSLA / SPY |
 | `market_date` | TEXT | Trading date (YYYY-MM-DD) |
-| `open` | REAL | Opening price |
-| `high` | REAL | Daily high |
-| `low` | REAL | Daily low |
-| `close` | REAL | Closing price |
+| `open` / `high` / `low` / `close` | REAL | OHLC prices |
 | `volume` | INTEGER | Volume traded |
 | `daily_return` | REAL | Log return: ln(close / prev_close) |
 
-### `job_log`
-
-One row per scheduler job execution. Used by `check_pipeline_health.py`.
+### `correlations`
 
 | Column | Type | Description |
 |:---|:---|:---|
-| `id` | INTEGER PK | Auto-increment |
-| `job_name` | TEXT | news_job / price_job |
-| `ran_at` | TEXT | UTC execution timestamp |
-| `inserted` | INTEGER | New records written to DB |
-| `skipped` | INTEGER | Duplicates ignored |
-| `error` | TEXT | Exception message if job failed, else NULL |
+| `ticker` | TEXT | |
+| `market_date` | TEXT | |
+| `mean_sentiment` | REAL | Confidence-weighted signed daily mean |
+| `log_return` | REAL | Next-day log return (shifted −1) |
+| `pearson_7d` | REAL | 7-day rolling Pearson r |
+| `pearson_30d` | REAL | 30-day rolling Pearson r |
+
+### `spike_events`
+
+| Column | Type | Description |
+|:---|:---|:---|
+| `ticker` | TEXT | |
+| `event_date` | TEXT | |
+| `event_type` | TEXT | positive / negative |
+| `mean_sentiment` | REAL | Score on the event day |
+| `return_t1d` | REAL | Log return 1 trading day after |
+| `return_t2d` | REAL | Log return 2 trading days after |
+| `return_t5d` | REAL | Log return 5 trading days after |
 
 ---
 
-## Limitations
+## Known Constraints
 
-- **Free-tier API constraints.** NewsAPI allows 100 requests/day on the free tier. The current configuration uses 18 requests/day (3 tickers × 2 fetches/day), leaving comfortable headroom. yfinance is an unofficial wrapper with no SLA.
-- **NYSE holidays not handled.** The `market_date` normalisation advances past weekends but does not account for public holidays. Headlines published on a NYSE holiday are assigned to the next calendar weekday, which may itself be a holiday.
-- **No GPU inference.** Phase 2 FinBERT inference will run on CPU. Expected latency is 200–800ms per batch of 16–32 headlines — acceptable for a scheduled pipeline, not suitable for live streaming.
-- **SQLite concurrency.** SQLite is single-writer. The scheduler and the health check script should not both attempt writes simultaneously. In the current architecture this is not an issue — the health check is read-only.
+- **Free-tier APIs.** NewsAPI: 100 req/day (current usage: ~18/day). yfinance: unofficial, no SLA.
+- **Data volume.** ~6.5 weeks of live data at current stage. Rolling correlation and event study results should be interpreted with caution — 30-day windows will have limited coverage, and spike event counts are small.
+- **NYSE holidays not handled.** `market_date` normalisation advances past weekends but not public holidays.
+- **MPS only tested locally.** Inference falls back to CPU on non-Apple hardware; not benchmarked on CUDA.
+- **Attention keyword is a heuristic.** Not a validated attribution method.
 
 ---
 
-## What's Next (Phase 2)
+## What's Next
 
-- Fine-tune `ProsusAI/finbert` on a custom labeled dataset (Reddit PRAW + NewsAPI headlines, ~1,000+ samples)
-- Deploy fine-tuned checkpoint for batch inference against the `unscored_headlines` backlog
-- Implement rolling Pearson correlation between daily mean sentiment and next-day log return
-- Build event study: return distributions at t+1h, t+4h, t+24h following sentiment spike events
-- Streamlit dashboard with analytics panel and live observability metrics
+- [ ] React frontend — consumes the FastAPI backend; sentiment feed, dual-axis correlation chart, event study table, keyword breakdown, flow strip
+- [ ] Docker Compose — containerise scheduler, FastAPI backend, and React frontend as separate services
 
 ---
 
 ## Author
 
-**Adam Mikail**
+**Adam Mikail** · ML Engineering Portfolio · Project 2 of 4
 [LinkedIn](https://www.linkedin.com/in/adammikail/) · [Email](mailto:adammikail2105@gmail.com)
 
 ---

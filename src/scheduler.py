@@ -3,17 +3,17 @@ src/scheduler.py
 ────────────────
 Main entry point for the backend pipeline.
 
-Runs two APScheduler jobs on separate intervals:
-  news_job   — fetches NewsAPI headlines every NEWS_INTERVAL_HOURS hours.
-               Always runs regardless of market hours.
-  price_job  — fetches yfinance OHLCV every PRICE_INTERVAL_HOURS hours.
-               The collector itself checks is_market_hours() and no-ops
-               if called outside trading hours, so it is safe to schedule
-               at any interval.
+Runs three APScheduler jobs on separate intervals:
+  news_job    — fetches NewsAPI headlines every NEWS_INTERVAL_HOURS hours.
+                Always runs regardless of market hours.
+  price_job   — fetches yfinance OHLCV every PRICE_INTERVAL_HOURS hours.
+                The collector itself checks is_market_hours() and no-ops
+                if called outside trading hours, so it is safe to schedule
+                at any interval.
+  scoring_job — scores any pending headlines with FinBERT every
+                SCORING_INTERVAL_HOURS hours, via model_runner.py.
 
-Both jobs write to the same SQLite database via DatabaseManager.
-Neither job runs inference — the inference layer (model_runner.py,
-built in Phase 2) reads from the database independently.
+All jobs write to the same SQLite database via DatabaseManager.
 
 Usage:
     python src/scheduler.py
@@ -40,9 +40,11 @@ from config.settings import (
     LOG_FILE,
     NEWS_INTERVAL_HOURS,
     PRICE_INTERVAL_HOURS,
+    SCORING_INTERVAL_HOURS,
 )
 from src.collectors.market_data import fetch_all_prices
 from src.collectors.news_fetcher import fetch_all_tickers
+from src.inference.model_runner import run_scoring_job
 from src.storage.db_manager import DatabaseManager
 
 setup_logging(LOG_FILE)
@@ -98,6 +100,25 @@ def price_job(db: DatabaseManager) -> None:
         db.log_job("price_job", ran_at, 0, 0, error=str(exc))
 
 
+def scoring_job(db: DatabaseManager) -> None:
+    """
+    Score any headlines pending FinBERT inference.
+
+    Picks up everything news_job has inserted since the last run and
+    writes sentiment_label/confidence/attention_keyword back in place.
+    """
+    ran_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    logger.info("── scoring_job starting (%s) ──", ran_at)
+
+    try:
+        scored = run_scoring_job(db)
+        db.log_job("scoring_job", ran_at, scored, 0)
+        logger.info("scoring_job done — %d scored", scored)
+    except Exception as exc:
+        logger.exception("scoring_job failed: %s", exc)
+        db.log_job("scoring_job", ran_at, 0, 0, error=str(exc))
+
+
 # ─────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────
@@ -106,8 +127,9 @@ def main() -> None:
     logger.info("=" * 60)
     logger.info("Sentiment pipeline starting")
     logger.info("Database : %s", DB_PATH)
-    logger.info("News job : every %dh", NEWS_INTERVAL_HOURS)
-    logger.info("Price job: every %dh (market hours only)", PRICE_INTERVAL_HOURS)
+    logger.info("News job   : every %dh", NEWS_INTERVAL_HOURS)
+    logger.info("Price job  : every %dh (market hours only)", PRICE_INTERVAL_HOURS)
+    logger.info("Scoring job: every %dh", SCORING_INTERVAL_HOURS)
     logger.info("=" * 60)
 
     db        = DatabaseManager(DB_PATH)
@@ -129,6 +151,15 @@ def main() -> None:
         args       = [db],
         id         = "price_job",
         name       = "yfinance OHLCV collector",
+        next_run_time = datetime.utcnow(),     # run immediately
+    )
+
+    scheduler.add_job(
+        scoring_job,
+        trigger    = IntervalTrigger(hours=SCORING_INTERVAL_HOURS),
+        args       = [db],
+        id         = "scoring_job",
+        name       = "FinBERT sentiment scorer",
         next_run_time = datetime.utcnow(),     # run immediately
     )
 

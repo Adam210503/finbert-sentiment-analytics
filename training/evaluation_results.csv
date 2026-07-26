@@ -1,0 +1,3 @@
+model,accuracy,macro_f1,neg_f1,neu_f1,pos_f1
+ProsusAI/finbert (base),0.821839,0.816791,0.806283,0.838207,0.805882
+fine-tuned (training/finetuned_finbert),0.929119,0.920129,0.879227,0.956916,0.924242

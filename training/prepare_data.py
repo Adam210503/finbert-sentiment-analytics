@@ -1,9 +1,12 @@
 import os
+import sys
 import requests
 import numpy as np
 import pandas as pd
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, load_dataset
 from sklearn.model_selection import train_test_split
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.helpers import seed_everything
 seed_everything(42)
 
@@ -14,11 +17,12 @@ def prepare_financial_dataset():
 
     # -------------------------------------------------------
     # 1. Load Financial PhraseBank via raw HTTP request
+    #    (downloaded directly — HF version has encoding issues)
     #    Avoids pandas.read_csv pickle machinery entirely,
     #    which conflicts with certain pandas 2.x / Python 3.12
     #    builds on macOS ARM.
     # -------------------------------------------------------
-    print("\n[1/4] Downloading Financial PhraseBank from stable source...")
+    print("\n[1/5] Downloading Financial PhraseBank from stable source...")
     try:
         url = (
             "https://raw.githubusercontent.com/"
@@ -65,8 +69,8 @@ def prepare_financial_dataset():
         if before != after:
             print(f"  ├─ Dropped {before - after} row(s) with unrecognised labels")
 
-        raw_dataset = Dataset.from_pandas(df, preserve_index=False)
-        print(f"  └─ Loaded {len(raw_dataset)} samples successfully")
+        phrasebank_df = df
+        print(f"  └─ Loaded {len(phrasebank_df)} samples successfully")
 
     except requests.exceptions.RequestException as e:
         print(f"❌ Network error: {e}")
@@ -77,9 +81,45 @@ def prepare_financial_dataset():
         raise
 
     # -------------------------------------------------------
-    # 2. Audit class distribution — surface training skew
+    # 2. Load FiQA 2018 from HuggingFace datasets
+    #    Label mapping in pauri32/fiqa-2018: 0=positive, 1=neutral, 2=negative
+    #    Remapped to our canonical scheme:   0=negative, 1=neutral, 2=positive
     # -------------------------------------------------------
-    print("\n[2/4] Auditing class distributions for training skew...")
+    print("\n[2/5] Loading FiQA 2018 from HuggingFace...")
+    try:
+        fiqa_raw = load_dataset("pauri32/fiqa-2018")
+        fiqa_label_remap = {0: 2, 1: 1, 2: 0}
+
+        fiqa_parts = []
+        for split in ["train", "validation", "test"]:
+            split_df = fiqa_raw[split].to_pandas()[["sentence", "label"]]
+            split_df["label"] = split_df["label"].map(fiqa_label_remap)
+            fiqa_parts.append(split_df)
+
+        fiqa_df = pd.concat(fiqa_parts, ignore_index=True)
+        fiqa_df = fiqa_df.dropna(subset=["label"])
+        fiqa_df["label"] = fiqa_df["label"].astype(int)
+        print(f"  └─ Loaded {len(fiqa_df)} FiQA samples successfully")
+
+    except Exception as e:
+        print(f"❌ Failed to load FiQA 2018: {e}")
+        raise
+
+    # -------------------------------------------------------
+    # 3. Combine corpora and audit class distribution
+    # -------------------------------------------------------
+    print("\n[3/5] Combining Financial PhraseBank + FiQA 2018...")
+    df = pd.concat([phrasebank_df, fiqa_df], ignore_index=True)
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)  # shuffle before split
+    print(f"  └─ Combined corpus: {len(df)} samples  "
+          f"(PhraseBank: {len(phrasebank_df)}  FiQA: {len(fiqa_df)})")
+
+    raw_dataset = Dataset.from_pandas(df, preserve_index=False)
+
+    # -------------------------------------------------------
+    # 4. Audit class distribution — surface training skew
+    # -------------------------------------------------------
+    print("\n[4/5] Auditing class distributions for training skew...")
     labels       = raw_dataset["label"]
     total        = len(labels)
     label_names  = {0: "Negative", 1: "Neutral", 2: "Positive"}
@@ -92,12 +132,12 @@ def prepare_financial_dataset():
               f"({pct:5.1f}%)  {bar}")
 
     # -------------------------------------------------------
-    # 3. Stratified split — 70 / 15 / 15
+    # 5. Stratified split — 70 / 15 / 15
     #    Fixed seed (42) guarantees reproducibility across runs.
     #    Stratification forces class ratios to be preserved in
     #    every split, preventing a skewed validation or test set.
     # -------------------------------------------------------
-    print("\n[3/4] Executing stratified splitting (70 / 15 / 15)...")
+    print("\n[5/5] Executing stratified splitting (70 / 15 / 15)...")
     df = raw_dataset.to_pandas()
 
     # Step A: carve out train (70%) and a temporary block (30%)
@@ -130,10 +170,10 @@ def prepare_financial_dataset():
         print(f"  ├─ {split_name:<5}: {ratio_str}")
 
     # -------------------------------------------------------
-    # 4. Serialise to Hugging Face DatasetDict on disk
+    # Serialise to Hugging Face DatasetDict on disk
     #    Saves re-downloading on every training run.
     # -------------------------------------------------------
-    print("\n[4/4] Serializing splits to disk...")
+    print("\n  Serializing splits to disk...")
     final_dataset = DatasetDict({
         "train":      Dataset.from_pandas(train_df.reset_index(drop=True)),
         "validation": Dataset.from_pandas(val_df.reset_index(drop=True)),

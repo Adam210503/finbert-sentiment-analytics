@@ -112,6 +112,8 @@ def _fetch_ticker(ticker: str) -> list[dict]:
             continue
 
         raw_ts = article.get("publishedAt", "")
+        url = article.get("url") or ""
+        logger.debug("URL captured: %s", url[:50])
 
         records.append({
             "ticker":        ticker,
@@ -119,6 +121,7 @@ def _fetch_ticker(ticker: str) -> list[dict]:
             "source":        _extract_source(article),
             "raw_timestamp": raw_ts,
             "market_date":   _market_date(raw_ts),
+            "url":           url,
         })
 
     return records

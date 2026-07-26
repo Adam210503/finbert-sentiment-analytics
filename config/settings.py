@@ -5,16 +5,20 @@ Single source of truth for all project configuration.
 Values are read from environment variables where possible so
 no credentials are ever hardcoded.
 
-Set before running:
-    export NEWSAPI_KEY=your_key_here
+Set in a .env file at the project root:
+    NEWSAPI_KEY=your_key_here
 """
 
 import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
+
 # ── Project root ─────────────────────────────────────────────────
 ROOT_DIR = Path(__file__).parent.parent
+
+load_dotenv(ROOT_DIR / ".env")
 
 # ── Target assets ────────────────────────────────────────────────
 TICKERS: list[str] = ["AAPL", "TSLA", "SPY"]
@@ -62,3 +66,8 @@ NEWS_DAYS_BACK: int = 7     # rolling window to look back for articles
 # Delay in seconds between retry attempts after HTTP 429
 BACKOFF_DELAYS: list[int] = [2, 4, 8]
 MAX_RETRIES: int           = 3
+
+# ── Inference (Phase 2) ───────────────────────────────────────────
+MODEL_PATH: Path          = ROOT_DIR / "training" / "finetuned_finbert"
+SCORING_BATCH_SIZE: int   = 200    # headlines pulled from DB per scoring run
+SCORING_INTERVAL_HOURS: int = 2
