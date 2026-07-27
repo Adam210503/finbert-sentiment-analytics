@@ -1,7 +1,7 @@
 # Ignore local databases and tracking logs
-data/
+data/sentiment_pipeline.db
+data/*.log
 logs/
-*.db
 *.log
 
 # Ignore python bytecode and environments
@@ -13,6 +13,7 @@ venv/
 
 # Ignore local environment keys
 .env
+dashboard/frontend/.env.production
 
 # Ignore generated training artifacts
 training/processed_dataset/

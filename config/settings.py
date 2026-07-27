@@ -35,7 +35,12 @@ TICKER_QUERIES: dict[str, str] = {
 NEWSAPI_KEY: str = os.getenv("NEWSAPI_KEY", "")
 
 # ── Database ─────────────────────────────────────────────────────
-DB_PATH: Path = ROOT_DIR / "data" / "sentiment_pipeline.db"
+# Use DEMO_DB_PATH env var if set (Render production), else use the live database locally
+_db_env = os.getenv("DEMO_DB_PATH")
+if _db_env:
+    DB_PATH = Path(_db_env)
+else:
+    DB_PATH = ROOT_DIR / "data" / "sentiment_pipeline.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # ── Logging ──────────────────────────────────────────────────────
