@@ -7,6 +7,7 @@ Run with (from project root):
     uvicorn dashboard.api.main:app --reload --port 8000
 """
 
+import os
 import sqlite3
 import sys
 from contextlib import asynccontextmanager, contextmanager
@@ -68,10 +69,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Allow localhost for development and the Vercel frontend for production
+# FRONTEND_URL env var is set on Render after the Vercel deployment is known
+allowed_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost",
+]
+
+frontend_url = os.environ.get("FRONTEND_URL")
+if frontend_url:
+    allowed_origins.append(frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 

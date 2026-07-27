@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: finbert-sentinel-api
+    runtime: python
+    buildCommand: pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install -r requirements.txt && pip install fastapi uvicorn python-multipart
+    startCommand: uvicorn dashboard.api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DEMO_DB_PATH
+        value: data/demo_sentiment_pipeline.db
+      - key: PYTHONPATH
+        value: /opt/render/project/src
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    plan: free
+    region: singapore
