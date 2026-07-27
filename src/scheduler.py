@@ -3,15 +3,19 @@ src/scheduler.py
 ────────────────
 Main entry point for the backend pipeline.
 
-Runs three APScheduler jobs on separate intervals:
-  news_job    — fetches NewsAPI headlines every NEWS_INTERVAL_HOURS hours.
-                Always runs regardless of market hours.
-  price_job   — fetches yfinance OHLCV every PRICE_INTERVAL_HOURS hours.
-                The collector itself checks is_market_hours() and no-ops
-                if called outside trading hours, so it is safe to schedule
-                at any interval.
-  scoring_job — scores any pending headlines with FinBERT every
-                SCORING_INTERVAL_HOURS hours, via model_runner.py.
+Runs four APScheduler jobs on separate intervals:
+  news_job      — fetches NewsAPI headlines every NEWS_INTERVAL_HOURS hours.
+                  Always runs regardless of market hours.
+  price_job     — fetches yfinance OHLCV every PRICE_INTERVAL_HOURS hours.
+                  The collector itself checks is_market_hours() and no-ops
+                  if called outside trading hours, so it is safe to schedule
+                  at any interval.
+  scoring_job   — scores any pending headlines with FinBERT every
+                  SCORING_INTERVAL_HOURS hours, via model_runner.py.
+  analytics_job — recomputes rolling Pearson correlations (7d/30d) then
+                  spike events every ANALYTICS_INTERVAL_HOURS hours.
+                  Runs correlation.py first so event_study.py always
+                  operates on fresh correlation data.
 
 All jobs write to the same SQLite database via DatabaseManager.
 
@@ -36,12 +40,15 @@ sys.path.insert(0, str(ROOT))
 
 from config.logging_config import setup_logging
 from config.settings import (
+    ANALYTICS_INTERVAL_HOURS,
     DB_PATH,
     LOG_FILE,
     NEWS_INTERVAL_HOURS,
     PRICE_INTERVAL_HOURS,
     SCORING_INTERVAL_HOURS,
 )
+from src.analysis.correlation import run_correlation_analysis
+from src.analysis.event_study import run_event_study
 from src.collectors.market_data import fetch_all_prices
 from src.collectors.news_fetcher import fetch_all_tickers
 from src.inference.model_runner import run_scoring_job
@@ -100,6 +107,24 @@ def price_job(db: DatabaseManager) -> None:
         db.log_job("price_job", ran_at, 0, 0, error=str(exc))
 
 
+def analytics_job(db: DatabaseManager) -> None:
+    """
+    Recompute rolling correlations then spike events.
+    Always runs in sequence so event study uses fresh correlation data.
+    """
+    ran_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    logger.info("── analytics_job starting (%s) ──", ran_at)
+
+    try:
+        run_correlation_analysis(DB_PATH)
+        run_event_study(DB_PATH)
+        db.log_job("analytics_job", ran_at, 0, 0)
+        logger.info("analytics_job done")
+    except Exception as exc:
+        logger.exception("analytics_job failed: %s", exc)
+        db.log_job("analytics_job", ran_at, 0, 0, error=str(exc))
+
+
 def scoring_job(db: DatabaseManager) -> None:
     """
     Score any headlines pending FinBERT inference.
@@ -127,9 +152,10 @@ def main() -> None:
     logger.info("=" * 60)
     logger.info("Sentiment pipeline starting")
     logger.info("Database : %s", DB_PATH)
-    logger.info("News job   : every %dh", NEWS_INTERVAL_HOURS)
-    logger.info("Price job  : every %dh (market hours only)", PRICE_INTERVAL_HOURS)
-    logger.info("Scoring job: every %dh", SCORING_INTERVAL_HOURS)
+    logger.info("News job      : every %dh", NEWS_INTERVAL_HOURS)
+    logger.info("Price job     : every %dh (market hours only)", PRICE_INTERVAL_HOURS)
+    logger.info("Scoring job   : every %dh", SCORING_INTERVAL_HOURS)
+    logger.info("Analytics job : every %dh", ANALYTICS_INTERVAL_HOURS)
     logger.info("=" * 60)
 
     db        = DatabaseManager(DB_PATH)
@@ -161,6 +187,15 @@ def main() -> None:
         id         = "scoring_job",
         name       = "FinBERT sentiment scorer",
         next_run_time = datetime.utcnow(),     # run immediately
+    )
+
+    scheduler.add_job(
+        analytics_job,
+        trigger       = IntervalTrigger(hours=ANALYTICS_INTERVAL_HOURS),
+        args          = [db],
+        id            = "analytics_job",
+        name          = "Correlation + event study analytics",
+        next_run_time = datetime.utcnow(),
     )
 
     logger.info("Scheduler started. Press Ctrl+C to stop.")

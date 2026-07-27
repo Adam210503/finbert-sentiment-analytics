@@ -16,7 +16,7 @@ An automated data engineering pipeline that collects financial news headlines an
 | Phase 1: Data pipeline | Ingestion, deduplication, SQLite persistence, observability | ✅ Complete |
 | Phase 2: NLP | FinBERT fine-tuning (Optuna HPO), evaluation, live sentiment scoring | ✅ Complete |
 | Phase 2: Analytics | Rolling correlation, spike event study | ✅ Complete |
-| Phase 3: Dashboard | FastAPI REST backend + React frontend | 🔧 In progress |
+| Phase 3: Dashboard | FastAPI REST backend + React + Vite frontend | ✅ Complete |
 | Phase 4: Deployment | Docker Compose containerisation | ⏳ Pending |
 
 ---
@@ -113,23 +113,29 @@ The scheduler writes headlines with `NULL` sentiment fields. `scoring_job` reads
 ```
 [NewsAPI]  ──── every 4h ────┐
                               ├──► [src/scheduler.py] ──► [SHA-256 dedup] ──► [SQLite]
-[yfinance] ──── every 1h ────┘                                           (sentiment_pipeline.db)
-                                                                                 │
-                    [scoring_job] ◄── NULL sentiment rows ───────────────────────┤
-                    (every 2h, src/inference/model_runner.py)                    │
-                                                                                 │
-                    [src/analysis/correlation.py] ─── correlations table ────────┤
-                    [src/analysis/event_study.py] ─── spike_events table ─────────┘
+[yfinance] ──── every 1h ────┘         │                               (sentiment_pipeline.db)
+                                        │                                        │
+                              ┌─────────┴──────────────────────────────────────┐│
+                              │  news_job     (every 4h)  → sentiment_scores   ││
+                              │  price_job    (every 1h)  → price_data         ││
+                              │  scoring_job  (every 2h)  → sentiment labels   ││
+                              │  analytics_job(every 6h)  → correlations       ││
+                              │                           → spike_events        ││
+                              └─────────────────────────────────────────────────┘│
+                                                                                  │
+                    [dashboard/api/main.py] ◄──────── FastAPI REST ───────────────┘
+                           │
+                    [dashboard/frontend/] ◄── React + Vite + Recharts (port 5173)
 ```
 
 **Data flow:**
 
-1. `scheduler.py` triggers `news_job`, `price_job`, and `scoring_job` on configurable intervals
-2. Each collector fetches data and returns normalised records
-3. `db_manager.py` applies `INSERT OR IGNORE` deduplication and writes to SQLite
-4. `scoring_job` pulls rows with `sentiment_label IS NULL`, runs them through the fine-tuned FinBERT checkpoint, and writes label, confidence, and attention keyword back in place
-5. `correlation.py` aggregates daily mean sentiment, joins with price data, and computes 7d/30d rolling Pearson correlation
-6. `event_study.py` identifies sentiment spike events and measures t+1d/t+2d/t+5d log returns
+1. `scheduler.py` triggers all four jobs on configurable intervals; each fires immediately on startup
+2. `news_job` fetches headlines from NewsAPI, `db_manager.py` applies `INSERT OR IGNORE` deduplication
+3. `price_job` fetches OHLCV from yfinance (no-op outside NYSE hours); log returns computed inline
+4. `scoring_job` pulls rows with `sentiment_label IS NULL`, runs FinBERT inference, writes label/confidence/attention keyword back in place
+5. `analytics_job` runs `correlation.py` (7d/30d rolling Pearson) then `event_study.py` (spike events + forward returns) in sequence — always on fresh data
+6. FastAPI backend serves all tables over a read-only REST API; React frontend polls it and renders live charts
 
 ---
 
@@ -149,7 +155,7 @@ The scheduler writes headlines with `NULL` sentiment fields. `scoring_job` reads
 | Training data | Financial PhraseBank + FiQA 2018 (~6,050 samples) |
 | Analysis | pandas · scipy · statsmodels |
 | API backend | FastAPI · uvicorn |
-| Frontend | React (in progress) |
+| Frontend | React 18 · Vite · Recharts · Tailwind CSS |
 | Infrastructure | Docker Compose (backend + dashboard services) |
 | Config | python-dotenv (`.env` file, gitignored) |
 
@@ -173,7 +179,7 @@ finbert/
 │   │   └── event_study.py            # Spike event detection → spike_events table
 │   ├── storage/
 │   │   └── db_manager.py             # Schema init, INSERT OR IGNORE, health queries
-│   └── scheduler.py                  # APScheduler entry point: news + price + scoring jobs
+│   └── scheduler.py                  # APScheduler entry point: news, price, scoring, analytics jobs
 ├── training/
 │   ├── prepare_data.py               # PhraseBank + FiQA 2018 → stratified 70/15/15 split
 │   ├── train.py                      # Fine-tunes ProsusAI/finbert, saves checkpoint
@@ -187,8 +193,18 @@ finbert/
 ├── utils/
 │   └── helpers.py                    # seed_everything() for reproducibility
 ├── dashboard/
-│   └── api/
-│       └── main.py                   # FastAPI REST API: /health /sentiment /correlation /events /keywords /flow
+│   ├── api/
+│   │   └── main.py                   # FastAPI REST API: /health /sentiment /correlation /events /keywords /flow /prices
+│   └── frontend/
+│       ├── src/
+│       │   ├── components/           # TopBar, ClockStrip, TickerNav, SentimentFeed, CorrelationChart, HealthPanel, …
+│       │   ├── hooks/usePolling.js   # Polling hook with configurable interval
+│       │   ├── api.js                # Typed fetch wrappers for each REST endpoint
+│       │   ├── constants.js          # Design token palette
+│       │   └── App.jsx               # Root: ticker state, price polling, layout
+│       ├── index.html
+│       ├── vite.config.js
+│       └── package.json
 ├── check_pipeline_health.py          # Observability: DB metrics, job history, backlog
 ├── view_data.py                      # Quick DB table viewer
 ├── data/
@@ -211,7 +227,7 @@ finbert/
 | `training/train.py` | `python training/train.py` | Fine-tunes ProsusAI/finbert with fixed hyperparameters. Saves checkpoint to `training/finetuned_finbert/`. |
 | `training/tune.py` | `python training/tune.py` | Optuna HPO: 30 trials (TPE sampler, MedianPruner), then retrains on train+val with best params, then calls `evaluate.py`. Saves `optuna_results.csv`. |
 | `training/evaluate.py` | `python training/evaluate.py` | Base vs fine-tuned comparison on held-out test set. Prints accuracy, macro F1, per-class F1. Saves `evaluation_results.csv` and confusion matrix PNGs. |
-| `src/scheduler.py` | `caffeinate -i python src/scheduler.py` | Starts live pipeline. Fires news, price, and scoring jobs immediately then every 4h / 1h / 2h. Logs to `logs/pipeline.log`. Runs indefinitely. |
+| `src/scheduler.py` | `caffeinate -i python src/scheduler.py` | Starts live pipeline. Fires all four jobs immediately then every 4h / 1h / 2h / 6h (news / price / scoring / analytics). Logs to `logs/pipeline.log`. Runs indefinitely. |
 | `src/inference/model_runner.py` | `python src/inference/model_runner.py` | Manually scores all unscored headlines once. Writes label, confidence, attention keyword to DB. |
 | `src/analysis/correlation.py` | `python src/analysis/correlation.py` | 7d/30d rolling Pearson correlation between daily sentiment and next-day log return. Writes to `correlations` table. Prints latest r values per ticker. |
 | `src/analysis/event_study.py` | `python src/analysis/event_study.py` | Detects sentiment spikes (≥0.65 / ≤−0.65), measures t+1d/t+2d/t+5d forward returns. Writes to `spike_events` table. Prints average returns per ticker per spike type. |
@@ -271,19 +287,33 @@ python training/evaluate.py       # compares base vs fine-tuned on held-out test
 caffeinate -i python src/scheduler.py
 ```
 
-All three jobs fire immediately on startup, then repeat on their configured intervals. To keep running after closing the terminal:
+All four jobs fire immediately on startup, then repeat on their configured intervals:
+
+| Job | Interval | What it does |
+|:---|:---|:---|
+| `news_job` | every 4h | Fetches headlines from NewsAPI |
+| `price_job` | every 1h | Fetches OHLCV from yfinance (market hours only) |
+| `scoring_job` | every 2h | Runs FinBERT on unscored headlines |
+| `analytics_job` | every 6h | Recomputes rolling correlations then spike events |
+
+To keep running after closing the terminal:
 
 ```bash
 nohup caffeinate -i python src/scheduler.py > /tmp/finbert.log 2>&1 &
 disown
 ```
 
-### Step 4 — Run analytics
+### Step 4 — Start the dashboard
 
 ```bash
-python src/analysis/correlation.py   # rolling Pearson correlation
-python src/analysis/event_study.py   # spike event study
+# Terminal 1 — FastAPI backend
+uvicorn dashboard.api.main:app --reload --port 8000
+
+# Terminal 2 — React frontend
+cd dashboard/frontend && npm install && npm run dev
 ```
+
+Open [http://localhost:5173](http://localhost:5173).
 
 ### Step 5 — Monitor
 
@@ -360,8 +390,7 @@ tail -f logs/pipeline.log            # live log stream
 
 ## What's Next
 
-- [ ] React frontend — consumes the FastAPI backend; sentiment feed, dual-axis correlation chart, event study table, keyword breakdown, flow strip
-- [ ] Docker Compose — containerise scheduler, FastAPI backend, and React frontend as separate services
+- [ ] Docker Compose — containerise scheduler, FastAPI backend, and React frontend as separate services for one-command deployment
 
 ---
 

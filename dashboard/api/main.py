@@ -130,6 +130,15 @@ def health():
                 ).fetchall()
             ]
 
+            recent_jobs = conn.execute(
+                """
+                SELECT job_name, ran_at, inserted, skipped, error
+                FROM job_log
+                ORDER BY id DESC
+                LIMIT 10
+                """
+            ).fetchall()
+
         return {
             "status": "ok",
             "headlines_total": total,
@@ -140,6 +149,16 @@ def health():
             "correlation_rows": corr_rows,
             "spike_events": spike_count,
             "tickers": tickers,
+            "recent_jobs": [
+                {
+                    "job_name": r["job_name"],
+                    "ran_at":   r["ran_at"],
+                    "inserted": r["inserted"],
+                    "skipped":  r["skipped"],
+                    "error":    r["error"],
+                }
+                for r in recent_jobs
+            ],
         }
     except HTTPException:
         raise
@@ -440,6 +459,46 @@ def flow():
             "mean_sentiment_today": round(mean_sentiment, 4) if mean_sentiment is not None else None,
             "pearson_7d_avg": round(pearson_7d_avg, 4) if pearson_7d_avg is not None else None,
             "latest_log_return": round(latest_log_return, 4) if latest_log_return is not None else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── GET /prices ────────────────────────────────────────────────────────────────
+
+@app.get("/prices", summary="Latest close price and daily return per ticker")
+def get_prices():
+    """
+    Returns the most recent close price and daily_return for each ticker
+    tracked in price_data. Used by the frontend ticker tab bar.
+    """
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.ticker, p.market_date, p.close, p.daily_return
+                FROM price_data p
+                INNER JOIN (
+                    SELECT ticker, MAX(market_date) AS max_date
+                    FROM price_data
+                    GROUP BY ticker
+                ) latest ON p.ticker = latest.ticker
+                        AND p.market_date = latest.max_date
+                ORDER BY p.ticker
+                """
+            ).fetchall()
+        return {
+            "data": [
+                {
+                    "ticker":       r["ticker"],
+                    "market_date":  r["market_date"],
+                    "close":        r["close"],
+                    "daily_return": r["daily_return"],
+                }
+                for r in rows
+            ]
         }
     except HTTPException:
         raise

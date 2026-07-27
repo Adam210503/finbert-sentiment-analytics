@@ -71,3 +71,6 @@ MAX_RETRIES: int           = 3
 MODEL_PATH: Path          = ROOT_DIR / "training" / "finetuned_finbert"
 SCORING_BATCH_SIZE: int   = 200    # headlines pulled from DB per scoring run
 SCORING_INTERVAL_HOURS: int = 2
+
+# Analytics: correlation + event study recomputed every 6 hours
+ANALYTICS_INTERVAL_HOURS: int = 6
