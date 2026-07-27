@@ -17,7 +17,7 @@ An automated data engineering pipeline that collects financial news headlines an
 | Phase 2: NLP | FinBERT fine-tuning (Optuna HPO), evaluation, live sentiment scoring | ✅ Complete |
 | Phase 2: Analytics | Rolling correlation, spike event study | ✅ Complete |
 | Phase 3: Dashboard | FastAPI REST backend + React + Vite frontend | ✅ Complete |
-| Phase 4: Deployment | Docker Compose containerisation | ⏳ Pending |
+| Phase 4: Deployment | Docker Compose containerisation | ✅ Complete |
 
 ---
 
@@ -245,6 +245,60 @@ finbert_results 20 TSLA positive   # last 20 positive TSLA headlines
 
 ---
 
+## Docker deployment
+
+The full system runs as three containers orchestrated by Docker Compose.
+
+### Prerequisites
+
+- Docker Desktop installed and running
+- The fine-tuned model checkpoint at `training/finetuned_finbert/` (generate locally first with `python training/tune.py`)
+- A `.env` file at the project root containing `NEWSAPI_KEY=your_key_here`
+
+### Build and run
+
+```bash
+# 1. Build all images
+docker compose build
+
+# 2. Seed the model checkpoint into the named volume
+docker run --rm \
+  -v $(pwd)/training/finetuned_finbert:/source:ro \
+  -v finbert_finbert-model:/dest \
+  alpine sh -c "cp -r /source/. /dest/"
+
+# 3. (Optional) Seed existing database
+docker run --rm \
+  -v $(pwd)/data/sentiment_pipeline.db:/source/sentiment_pipeline.db:ro \
+  -v finbert_finbert-data:/dest \
+  alpine sh -c "cp /source/sentiment_pipeline.db /dest/"
+
+# 4. Start all services
+docker compose up -d
+
+# 5. Check all containers are healthy
+docker compose ps
+```
+
+Dashboard is available at `http://localhost`. FastAPI docs at `http://localhost:8000/docs`.
+
+### Logs
+
+```bash
+docker compose logs -f backend   # scheduler + scoring
+docker compose logs -f api       # FastAPI request logs
+docker compose logs -f frontend  # nginx access logs
+```
+
+### Stop
+
+```bash
+docker compose down              # stop containers, keep volumes
+docker compose down -v           # stop containers and delete all data
+```
+
+---
+
 ## Setup & Usage
 
 ### Prerequisites
@@ -390,7 +444,7 @@ tail -f logs/pipeline.log            # live log stream
 
 ## What's Next
 
-- [ ] Docker Compose — containerise scheduler, FastAPI backend, and React frontend as separate services for one-command deployment
+- [x] Docker Compose — containerise scheduler, FastAPI backend, and React frontend as separate services for one-command deployment
 
 ---
 
