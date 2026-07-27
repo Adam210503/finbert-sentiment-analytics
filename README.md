@@ -382,7 +382,7 @@ tail -f logs/pipeline.log            # live log stream
 
 - **Free-tier APIs.** NewsAPI: 100 req/day (current usage: ~18/day). yfinance: unofficial, no SLA.
 - **Data volume.** ~6.5 weeks of live data at current stage. Rolling correlation and event study results should be interpreted with caution — 30-day windows will have limited coverage, and spike event counts are small.
-- **NYSE holidays not handled.** `market_date` normalisation advances past weekends but not public holidays.
+- **NYSE holidays not handled.** The `market_date` normalisation rule in `src/collectors/news_fetcher.py` advances timestamps past weekends (Saturday and Sunday) but does not account for NYSE public holidays. A headline published on a holiday — for example, July 4th, Thanksgiving, or Christmas — is mapped to that calendar date rather than the next trading session open. This means sentiment scores for those dates are paired with the wrong price record in `correlation.py` and `event_study.py`, or not paired at all if no price record exists for that date. The affected dates in the US equity calendar are: New Year's Day, Martin Luther King Jr. Day, Presidents Day, Good Friday, Memorial Day, Juneteenth, Independence Day, Labour Day, Thanksgiving, and Christmas. A fix would involve integrating a trading calendar library such as `pandas_market_calendars` or `exchange_calendars` and replacing the weekend-only check with a full holiday-aware `next_trading_day()` function. This is deferred as a known limitation.
 - **MPS only tested locally.** Inference falls back to CPU on non-Apple hardware; not benchmarked on CUDA.
 - **Attention keyword is a heuristic.** Not a validated attribution method.
 
