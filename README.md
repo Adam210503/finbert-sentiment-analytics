@@ -280,7 +280,7 @@ docker compose up -d
 docker compose ps
 ```
 
-Dashboard is available at `http://localhost`. FastAPI docs at `http://localhost:8000/docs`.
+Dashboard is available at `https://finbert-sentinel.vercel.app/`. FastAPI docs at `http://localhost:8000/docs`.
 
 ### Logs
 
